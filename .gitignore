@@ -148,6 +148,9 @@ dmypy.json
 cache/
 data/
 
+# Pretrained model checkpoints
+openvla-7b/
+
 # Rollout videos and wandb logs
 rollouts/
 wandb/

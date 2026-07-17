@@ -1,5 +1,9 @@
+# Adjusted for NVIDIA RTX 5090 / RTX 50-series (Blackwell sm_120) support:
+# - PyTorch >= 2.8.0 with CUDA 12.8 required for Blackwell architecture (2.6/2.7 do NOT support sm_120)
+# - Use attn_implementation="sdpa" instead of "flash_attention_2"
+
 timm==0.9.10
 tokenizers==0.19.1
-torch>=2.2.0
-torchvision>=0.16.0
+torch>=2.8.0
+torchvision>=0.23.0
 transformers==4.40.1
