@@ -841,6 +841,12 @@ def libero_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     return trajectory
 
 
+# === [新增] 伏羲挖掘机数据集变换函数 (RTX 5090 Blackwell适配) ===
+# 数据已经是 4-DoF 关节增量 + "挖掘装车" 指令，无需额外转换
+def excavator_motion_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+    return trajectory
+
+
 # === Registry ===
 OXE_STANDARDIZATION_TRANSFORMS = {
     "bridge_oxe": bridge_oxe_dataset_transform,
@@ -919,4 +925,6 @@ OXE_STANDARDIZATION_TRANSFORMS = {
     "libero_object_no_noops": libero_dataset_transform,
     "libero_goal_no_noops": libero_dataset_transform,
     "libero_10_no_noops": libero_dataset_transform,
+    # === [新增] 伏羲挖掘机数据集 (RTX 5090 Blackwell适配) ===
+    "excavator_motion": excavator_motion_dataset_transform,
 }

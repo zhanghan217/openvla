@@ -206,5 +206,10 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
     "libero_10_no_noops": [
         ("libero_10_no_noops", 1.0),
     ],
+    # === [新增] 伏羲挖掘机数据集 (RTX 5090 Blackwell适配) ===
+    # 单数据集微调, 权重 1.0
+    "excavator_motion": [
+        ("excavator_motion", 1.0),
+    ],
 }
 # fmt: on

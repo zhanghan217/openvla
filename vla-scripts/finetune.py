@@ -45,6 +45,9 @@ from prismatic.vla.action_tokenizer import ActionTokenizer
 from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
 from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics
 
+# === [新增] 伏羲挖掘机数据集支持 (RTX 5090 Blackwell适配) ===
+from prismatic.vla.datasets.excavator_dataset import ExcavatorDataset
+
 from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
 from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
@@ -107,12 +110,19 @@ class FinetuneConfig:
     wandb_entity: str = "stanford-voltron"                          # Name of entity to log under
     run_id_note: Optional[str] = None                               # Extra note for logging, Weights & Biases
 
+    # === [新增] 伏羲挖掘机数据集路径 (RTX 5090 Blackwell适配) ===
+    # 设置后跳过 RLDS 管道，直接读取预处理好的 TFRecord
+    # 用法: --custom_dataset_path FuXiData/processed/excavator_motion.tfrecord
+    custom_dataset_path: Optional[str] = None                       # 自定义 TFRecord 数据集路径
+    custom_dataset_config: Optional[str] = None                     # 自定义数据集配置文件路径
+    no_wandb: bool = False                                          # 禁用 W&B 日志（无需登录）
+
     # fmt: on
 
 
 @draccus.wrap()
 def finetune(cfg: FinetuneConfig) -> None:
-    print(f"Fine-tuning OpenVLA Model `{cfg.vla_path}` on `{cfg.dataset_name}`")
+    print(f"Fine-tuning OpenVLA Model `{cfg.vla_path}` on `{cfg.custom_dataset_path or cfg.dataset_name}`")
 
     # [Validate] Ensure GPU Available & Set Device / Distributed Context
     assert torch.cuda.is_available(), "Fine-tuning assumes at least one GPU is available!"
@@ -121,8 +131,11 @@ def finetune(cfg: FinetuneConfig) -> None:
     torch.cuda.empty_cache()
 
     # Configure Unique Experiment ID & Log Directory
+    dataset_label = cfg.dataset_name
+    if cfg.custom_dataset_path is not None:
+        dataset_label = "excavator_motion"
     exp_id = (
-        f"{cfg.vla_path.split('/')[-1]}+{cfg.dataset_name}"
+        f"{cfg.vla_path.split('/')[-1]}+{dataset_label}"
         f"+b{cfg.batch_size * cfg.grad_accumulation_steps}"
         f"+lr-{cfg.learning_rate}"
     )
@@ -206,20 +219,35 @@ def finetune(cfg: FinetuneConfig) -> None:
     #     prompt_builder_fn=PurePromptBuilder if "v01" not in cfg.vla_path else VicunaV15ChatPromptBuilder,
     # )
     # ---
-    batch_transform = RLDSBatchTransform(
-        action_tokenizer,
-        processor.tokenizer,
-        image_transform=processor.image_processor.apply_transform,
-        prompt_builder_fn=PurePromptBuilder if "v01" not in cfg.vla_path else VicunaV15ChatPromptBuilder,
-    )
-    vla_dataset = RLDSDataset(
-        cfg.data_root_dir,
-        cfg.dataset_name,
-        batch_transform,
-        resize_resolution=tuple(vla.module.config.image_sizes),
-        shuffle_buffer_size=cfg.shuffle_buffer_size,
-        image_aug=cfg.image_aug,
-    )
+
+    # === [新增] 伏羲挖掘机数据集加载 (RTX 5090 Blackwell适配) ===
+    # 当设置 --custom_dataset_path 时使用 ExcavatorDataset 而非 RLDS 管道
+    if cfg.custom_dataset_path is not None:
+        config_path = cfg.custom_dataset_config or str(Path(cfg.custom_dataset_path).parent / "config.json")
+        vla_dataset = ExcavatorDataset(
+            tfrecord_path=str(cfg.custom_dataset_path),
+            config_path=config_path,
+            action_tokenizer=action_tokenizer,
+            base_tokenizer=processor.tokenizer,
+            image_transform=processor.image_processor.apply_transform,
+            prompt_builder_fn=PurePromptBuilder if "v01" not in cfg.vla_path else VicunaV15ChatPromptBuilder,
+        )
+    else:
+        # [原始] 标准 RLDS 数据加载管道
+        batch_transform = RLDSBatchTransform(
+            action_tokenizer,
+            processor.tokenizer,
+            image_transform=processor.image_processor.apply_transform,
+            prompt_builder_fn=PurePromptBuilder if "v01" not in cfg.vla_path else VicunaV15ChatPromptBuilder,
+        )
+        vla_dataset = RLDSDataset(
+            cfg.data_root_dir,
+            cfg.dataset_name,
+            batch_transform,
+            resize_resolution=tuple(vla.module.config.image_sizes),
+            shuffle_buffer_size=cfg.shuffle_buffer_size,
+            image_aug=cfg.image_aug,
+        )
 
     # [Important] Save Dataset Statistics =>> used to de-normalize actions for inference!
     if distributed_state.is_main_process:
@@ -238,7 +266,7 @@ def finetune(cfg: FinetuneConfig) -> None:
     )
 
     # Initialize Logging =>> W&B
-    if distributed_state.is_main_process:
+    if distributed_state.is_main_process and not cfg.no_wandb:
         wandb.init(entity=cfg.wandb_entity, project=cfg.wandb_project, name=f"ft+{exp_id}")
 
     # Deque to store recent train metrics (used for computing smoothened metrics for gradient accumulation)
@@ -301,7 +329,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             smoothened_l1_loss = sum(recent_l1_losses) / len(recent_l1_losses)
 
             # Push Metrics to W&B (every 10 gradient steps)
-            if distributed_state.is_main_process and gradient_step_idx % 10 == 0:
+            if distributed_state.is_main_process and not cfg.no_wandb and gradient_step_idx % 10 == 0:
                 wandb.log(
                     {
                         "train_loss": smoothened_loss,
@@ -318,7 +346,8 @@ def finetune(cfg: FinetuneConfig) -> None:
                 progress.update()
 
             # Save Model Checkpoint =>> by default, only keeps the latest checkpoint, continually overwriting it!
-            if gradient_step_idx > 0 and gradient_step_idx % cfg.save_steps == 0:
+            # 仅在梯度步结束时保存（避免梯度累积期间重复保存）
+            if gradient_step_idx > 0 and gradient_step_idx % cfg.save_steps == 0 and (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
                 if distributed_state.is_main_process:
                     print(f"Saving Model Checkpoint for Step {gradient_step_idx}")
 

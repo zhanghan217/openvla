@@ -670,4 +670,15 @@ OXE_DATASET_CONFIGS = {
         "state_encoding": StateEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
+    # === [新增] 伏羲挖掘机数据集 (RTX 5090 Blackwell适配) ===
+    # 数据: 4-DoF 关节增量 [大臂, 小臂, 铲斗, 回转], 10fps, BGR→RGB 224×224
+    # 来源: /mnt/nas/创新中心/伏羲数据集/excavator-motion/
+    # 预处理脚本: vla-scripts/preprocess_fuxi.py → FuXiData/processed/
+    "excavator_motion": {
+        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": [None, None, None, None, None, None, None, None],
+        "state_encoding": StateEncoding.NONE,
+        "action_encoding": ActionEncoding.EEF_POS,  # 通用编码, 实际4维关节增量
+    },
 }
