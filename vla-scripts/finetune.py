@@ -275,10 +275,18 @@ def finetune(cfg: FinetuneConfig) -> None:
     recent_l1_losses = deque(maxlen=cfg.grad_accumulation_steps)
 
     # Train!
+    # === [修改] 原代码 `for batch_idx, batch in enumerate(dataloader):` 只会跑完一遍数据集就自然结束 ===
+    # RLDS 的 IterableDataset 会自动无限循环，但 ExcavatorDataset 是有限长度的标准 Dataset，
+    # DataLoader 耗尽后 for 循环会正常退出（不是报错/被杀），导致训练在未达到 max_steps 时提前停止。
+    # 改为外层 while + 内层 for，batch_idx 用不随 epoch 重置的全局计数器，实现跨轮次自动继续训练。
+    global_batch_idx = 0  # [新增] 跨 epoch 累计的全局 batch 计数器，不随 dataloader 重新迭代而重置
+    training_done = False  # [新增] 达到 max_steps 时跳出外层 while 的标记
     with tqdm.tqdm(total=cfg.max_steps, leave=False) as progress:
         vla.train()
         optimizer.zero_grad()
-        for batch_idx, batch in enumerate(dataloader):
+        while not training_done:  # [新增] 外层循环：一轮数据集跑完后自动重新开始
+          for batch in dataloader:  # [修改] 去掉 enumerate，batch_idx 改用 global_batch_idx
+            batch_idx = global_batch_idx  # [新增] 用全局计数器替代 enumerate 的局部计数器
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 output: CausalLMOutputWithPast = vla(
                     input_ids=batch["input_ids"].to(device_id),
@@ -395,7 +403,10 @@ def finetune(cfg: FinetuneConfig) -> None:
             # Stop training when max_steps is reached
             if gradient_step_idx == cfg.max_steps:
                 print(f"Max step {cfg.max_steps} reached! Stopping training...")
+                training_done = True  # [新增] 同时标记外层 while 结束，否则会开始下一轮 epoch
                 break
+
+            global_batch_idx += 1  # [新增] 每处理完一个 batch 递增全局计数器，跨 epoch 不重置
 
 
 if __name__ == "__main__":
