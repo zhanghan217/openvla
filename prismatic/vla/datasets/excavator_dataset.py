@@ -9,7 +9,6 @@ excavator_dataset.py
 """
 
 import json
-import struct
 from pathlib import Path
 from typing import Type
 
@@ -57,53 +56,40 @@ class ExcavatorDataset(Dataset):
         self.tfrecord = str(tfrecord_path)
         self.image_size = tuple(self.config["img_size"])
 
-        # 统计帧数 (快速扫描)
-        dataset = tf.data.TFRecordDataset(self.tfrecord)
-        count = 0
-        for _ in dataset:
-            count += 1
-        self._len = count
+        # 一次性全量加载所有帧到内存 (TFRecord 不支持随机访问，
+        # 逐帧 skip().take(1) 会随 idx 线性变慢，训练几千步后单步耗时会从几秒涨到几十秒)
+        feature_desc = {
+            "image": tf.io.FixedLenFeature([], tf.string),
+            "action": tf.io.FixedLenFeature([4], tf.float32),
+        }
+        self._records: list[dict] = []
+        raw_dataset = tf.data.TFRecordDataset(self.tfrecord)
+        for raw_record in raw_dataset:
+            example = tf.io.parse_single_example(raw_record, feature_desc)
+            self._records.append(
+                {
+                    "image_bytes": example["image"].numpy(),
+                    "action": example["action"].numpy().astype(np.float32),
+                }
+            )
+        self._len = len(self._records)
 
         # 加载归一化统计
         stats_path = tfrecord_path.parent / "dataset_statistics.json"
         with open(stats_path, "r") as f:
             self.dataset_statistics = json.load(f)
 
-        # LRU 缓存: 按需加载
-        self._frames_cache = {}
-        self._cache_size = 5000
-
     def __len__(self):
         return self._len
-
-    def _load_frame(self, idx: int) -> dict:
-        """从 TFRecord 加载单帧"""
-        dataset = tf.data.TFRecordDataset(self.tfrecord)
-        dataset = dataset.skip(idx).take(1)
-
-        feature_desc = {
-            "image": tf.io.FixedLenFeature([], tf.string),
-            "action": tf.io.FixedLenFeature([4], tf.float32),
-        }
-
-        for raw_record in dataset:
-            example = tf.io.parse_single_example(raw_record, feature_desc)
-            img_bytes = example["image"].numpy()
-            action = example["action"].numpy()
-
-            # 从 raw bytes 重建图片
-            img = Image.frombytes("RGB", self.image_size, img_bytes)
-            return {"image": img, "action": action}
-
-        raise IndexError(f"Frame {idx} not found in TFRecord")
 
     def __getitem__(self, idx):
         # 循环索引
         idx = idx % self._len
 
-        frame = self._load_frame(idx)
-        image = frame["image"]
-        action = frame["action"].astype(np.float32)
+        record = self._records[idx]
+        # 从 raw bytes 重建图片 (按需解码，避免常驻内存里存 PIL 对象)
+        image = Image.frombytes("RGB", self.image_size, record["image_bytes"])
+        action = record["action"]
 
         # 构建 Prompt
         prompt_builder = self.prompt_builder_fn("openvla")
