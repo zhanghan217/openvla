@@ -53,7 +53,7 @@ dependencies = [
     "torchaudio>=2.8.0",
     "transformers==4.40.1",
     "wandb",
-    "tensorflow==2.15.0",
+    "tensorflow-cpu==2.15.0",  # 使用 CPU 版避免与 PyTorch 争夺 CUDA context (RTX 5090/Blackwell 环境下踩过坑)
     "tensorflow_datasets==4.9.3",
     "tensorflow_graphics==2021.12.3",
     "dlimp @ git+https://github.com/moojink/dlimp_openvla"
