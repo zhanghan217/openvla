@@ -546,6 +546,27 @@ OpenVLA 使用 PurePromptBuilder（`base_prompter.py:28-73`）：
 | 需要深度图 | **不需要** |
 | 需要本体感知 | **不需要** |
 
+## 21. 大显卡训练速度未提升的问题排查
+
+**问**: 本机5090(32GB, bs=4)和租用服务器(96GB, bs=24)训练速度都是2.3s/步左右，为什么大显卡没有明显加速？
+
+**答**: 根因在 `finetune.py` 的 `DataLoader` 硬编码了 `num_workers=0`：
+```python
+num_workers=0,  # Important =>> Set to 0 if using RLDS; TFDS rolls其own parallelism!
+```
+
+这个限制是为 RLDS(IterableDataset)管道设计的——RLDS 自己管理并行，不需要 DataLoader 开多进程。但自定义的 `ExcavatorDataset` 是标准 Dataset，`__getitem__` 里做图片解码、tokenizer分词等 CPU 单线程操作，`num_workers=0` 意味着这些预处理全部串行执行，GPU 再快也要等 CPU 处理完当前批次才能拿到下一批数据——瓶颈落在 CPU 单线程上，与显卡性能无关，这解释了为什么换更大显卡训练速度没有等比例提升。
+
+**修法**: 
+- 新增 `--dataloader_num_workers` 参数，仅在使用 `custom_dataset_path` 时生效（RLDS 管道继续强制用 0，避免冲突）
+- 开启时同步启用 `pin_memory` 和 `persistent_workers`，减少多进程开销
+
+**修改位置**: `finetune.py`（`FinetuneConfig` 新增字段 + DataLoader 创建处）
+
+**使用**: 服务器（22核CPU）建议 `--dataloader_num_workers 8`
+
+---
+
 ### 对挖掘机的影响
 
 你的数据只需要：
@@ -675,3 +696,6 @@ OpenVLA 使用 PurePromptBuilder（`base_prompter.py:28-73`）：
 DM0.5 还多了一个 **Embodiment CoT** 机制——LLM 会先输出语言形式的推理过程（任务规划、环境预测、动作意图），这些推理文本作为条件输入给 Action Expert，再由 Action Expert 生成精确的连续动作。
 
 所以 DM0.5 的分工更像：**LLM 当"大脑"思考，Action Expert 当"小脑"执行**。
+
+
+

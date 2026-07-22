@@ -116,6 +116,8 @@ class FinetuneConfig:
     custom_dataset_path: Optional[str] = None                       # 自定义 TFRecord 数据集路径
     custom_dataset_config: Optional[str] = None                     # 自定义数据集配置文件路径
     no_wandb: bool = False                                          # 禁用 W&B 日志（无需登录）
+    dataloader_num_workers: int = 0                                 # [新增] 自定义数据集的 DataLoader 并行进程数
+                                                                    #   （仅在 custom_dataset_path 设置时生效，RLDS 管道强制用0，见下方 DataLoader 创建处）
 
     # fmt: on
 
@@ -257,12 +259,20 @@ def finetune(cfg: FinetuneConfig) -> None:
     collator = PaddedCollatorForActionPrediction(
         processor.tokenizer.model_max_length, processor.tokenizer.pad_token_id, padding_side="right"
     )
+    # === [修改] num_workers 区分 RLDS 与自定义数据集 ===
+    # RLDS(IterableDataset) 必须用 0，它自己管理并行(TFDS内部多线程)，多进程DataLoader会冲突甚至报错。
+    # 自定义 ExcavatorDataset 是标准 Dataset，全量数据已缓存到内存，没有I/O瓶颈，
+    # 但 __getitem__ 里的图片解码/tokenizer分词是CPU单线程操作，大显卡(如96GB卡)会被这里拖累，
+    # 开多进程(num_workers>0)可以并行预处理下一批数据，避免GPU空等。
+    effective_num_workers = cfg.dataloader_num_workers if cfg.custom_dataset_path is not None else 0
     dataloader = DataLoader(
         vla_dataset,
         batch_size=cfg.batch_size,
         sampler=None,
         collate_fn=collator,
-        num_workers=0,  # Important =>> Set to 0 if using RLDS; TFDS rolls its own parallelism!
+        num_workers=effective_num_workers,  # [修改] 原来固定为0，现在自定义数据集可配置并行
+        pin_memory=(effective_num_workers > 0),  # [新增] 配合多进程加速数据搬到GPU
+        persistent_workers=(effective_num_workers > 0),  # [新增] 避免每个epoch重启worker进程的开销
     )
 
     # Initialize Logging =>> W&B
